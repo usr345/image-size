@@ -928,25 +928,85 @@ sub webpsize {
     #    - 'RIFF', 4 bytes
     #    - filesize, 4 bytes
     #    - 'WEBP', 4 bytes
-    # 2. VP8 frame
-    #    - 'VP8', 3 bytes
-    #    - frame meta, 8 bytes
-    #    - marker, 3 bytes
-    my $buf = $READ_IN->($img, 4, 26);
-    my ($raw_w, $raw_h) = unpack '(SS)<', $buf;
-    my $b14 = 2**14 - 1;
+    # One of the frames: VP8 frame, VP8X frame, VP8L frame
 
-    # The width and height values contain a 2-bit scaling factor,
-    # which is left-shifted by 14 bits. We ignore this, since it seems
-    # not to be relevant for our purposes. WEBP images in actual use
-    # all seem to have a scaling factor of 0, anyway. (The meaning
-    # of the scaling factor is as follows: 0=no upscale, 1=upscale by 5/4,
-    # 2=upscale by 5/3, 3=upscale by 2).
-    #
-    # my $wscale = $raw_w >> 14;
-    # my $hscale = $raw_h >> 14;
-    my $x = $raw_w & $b14;
-    my $y = $raw_h & $b14;
+    my $buf = $READ_IN->($img, 16, 0);
+    return unless length($buf) == 16;
+
+    my ($riff, $size, $webp, $chunk) = unpack('A4 V A4 A4', $buf);
+
+    return if $riff ne 'RIFF';
+    return if $webp ne 'WEBP';
+
+    my ($x, $y);
+    if ($chunk eq 'VP8') {
+        # - 'VP8', 3 bytes
+        # - frame meta, 8 bytes
+        # - marker, 3 bytes
+        my $buf = $READ_IN->($img, 4, 26);
+
+        my ($raw_w, $raw_h) = unpack('vv', $buf);
+        my $b14 = 0x3fff;
+
+        # The width and height values contain a 2-bit scaling factor,
+        # which is left-shifted by 14 bits. We ignore this, since it seems
+        # not to be relevant for our purposes. WEBP images in actual use
+        # all seem to have a scaling factor of 0, anyway. (The meaning
+        # of the scaling factor is as follows: 0=no upscale, 1=upscale by 5/4,
+        # 2=upscale by 5/3, 3=upscale by 2).
+        #
+        # my $wscale = $raw_w >> 14;
+        # my $hscale = $raw_h >> 14;
+        $x = $raw_w & $b14;
+        $y = $raw_h & $b14;
+    }
+    elsif ($chunk eq 'VP8X') {
+        # Offset  Size  Description
+        # ------  ----  -------------------------
+        # 0       4     "RIFF"
+        # 4       4     RIFF size
+        # 8       4     "WEBP"
+        # 12      4     "VP8X"
+        # 16      4     VP8X chunk size (=10)
+        # 20      1     Feature flags
+        # 21      3     Reserved
+        # 24      3     Canvas width  - 1 (24-bit little-endian)
+        # 27      3     Canvas height - 1 (24-bit little-endian)
+        my $buf = $READ_IN->($img, 6, 24);
+
+        my ($w0, $w1, $w2, $h0, $h1, $h2) = unpack('C6', $buf);
+        $x = $w0 | ($w1 << 8) | ($w2 << 16);
+        $y = $h0 | ($h1 << 8) | ($h2 << 16);
+
+        ++$x;
+        ++$y;
+    }
+    elsif ($chunk eq 'VP8L') {
+        # Offset  Size  Description
+        # ------  ----  -------------------------
+        # 0       4     "RIFF"
+        # 4       4     RIFF size
+        # 8       4     "WEBP"
+        # 12      4     "VP8L"
+        # 16      4     VP8L chunk size
+        # 20      1     Signature (0x2F)
+        # 21      4     Packed image dimensions
+        my $buf = $READ_IN->($img, 5, 20);
+
+        my ($sig, $bits) = unpack("CV", $buf);
+
+        return unless $sig == 0x2f;
+
+        # Packed 32-bit field:
+        # bits  0..13  width  - 1
+        # bits 14..27  height - 1
+        # bits 28..31  version/flags
+        $x = ($bits & 0x3fff) + 1;
+        $y = (($bits >> 14) & 0x3fff) + 1;
+    }
+    else {
+        return;
+    }
 
     return ($x, $y, 'WEBP');
 }
